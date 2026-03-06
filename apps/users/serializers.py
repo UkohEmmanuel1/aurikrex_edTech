@@ -1,10 +1,16 @@
 from rest_framework import serializers
+# FIX 1: Changed 'vaildators' to 'validators'
+from rest_framework.validators import UniqueValidator 
 from django.contrib.auth.models import User
 from .models import OneTimePassword, Profile
 from django.contrib.auth import authenticate
 
 # --- 1. Signup: Handles User + Role ---
 class UserSignupSerializer(serializers.ModelSerializer):
+    email = serializers.EmailField(
+        # FIX 2: Changed 'validatiors' to 'validators'
+        validators=[UniqueValidator(queryset=User.objects.all(), message="This email is already registered.")]
+    )
     password = serializers.CharField(write_only=True, min_length=6)
     role = serializers.CharField(write_only=True, required=False)  # 'student' or 'teacher'
 
@@ -17,11 +23,13 @@ class UserSignupSerializer(serializers.ModelSerializer):
         email = validated_data['email']
         password = validated_data['password']
 
-        # Check if email exists
+        # Since we use UniqueValidator above, we technically don't need this check here,
+        # but it doesn't hurt as a backup!
         if User.objects.filter(email=email).exists():
             raise serializers.ValidationError({"email": "This email is already registered."})
             
         # Create User (Inactive until verified)
+        # Using email as username is standard for email-based login
         user = User.objects.create_user(username=email, email=email, password=password)
         user.is_active = False 
         user.save()
@@ -54,4 +62,4 @@ class PasswordResetRequestSerializer(serializers.Serializer):
 class PasswordResetConfirmSerializer(serializers.Serializer):
     email = serializers.EmailField()
     otp = serializers.CharField(max_length=6)
-    new_password = serializers.CharField(write_only=True, min_length=8)    
+    new_password = serializers.CharField(write_only=True, min_length=8)

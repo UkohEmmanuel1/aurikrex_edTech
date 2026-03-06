@@ -1,70 +1,107 @@
 from rest_framework import status, views
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
-from django.contrib.auth.models import User
-from django.contrib.auth import authenticate
 from django.core.mail import send_mail
 from django.conf import settings
+from django.utils import timezone
+from rest_framework.permissions import AllowAny  
+from django.db import transaction, IntegrityError
+from django.contrib.auth import get_user_model
+import random
+
 from .serializers import (
     UserSignupSerializer, VerifyOTPSerializer, ResendOTPSerializer, 
     LoginSerializer, PasswordResetRequestSerializer, PasswordResetConfirmSerializer
 )
 from .models import OneTimePassword, Profile
-import random
-from django.utils import timezone
-from rest_framework.permissions import AllowAny  
+
+User = get_user_model()
 
 # --- NEW IMPORTS FOR GOOGLE AUTH ---
 from allauth.socialaccount.providers.google.views import GoogleOAuth2Adapter
-from allauth.socialaccount.providers.oauth2.client import OAuth2Client
 from dj_rest_auth.registration.views import SocialLoginView
 
-# Helper: Generate Tokens manually
+# ==========================================
+# HELPER FUNCTIONS
+# ==========================================
+
+# Helper: Generate Tokens manually (FIXED for missing Profiles)
 def get_tokens_for_user(user):
     refresh = RefreshToken.for_user(user)
+    
+    # Safely check if the user has a profile to prevent 500 crashes
+    if hasattr(user, 'profile') and user.profile is not None:
+        role = user.profile.role
+    else:
+        role = 'student'  # Fallback role if no profile exists
+        
     return {
         'refresh': str(refresh),
         'access': str(refresh.access_token),
-        'role': user.profile.role,
+        'role': role,
         'email': user.email
     }
 
-# --- 1. Signup View ---
+# ==========================================
+# AUTHENTICATION VIEWS
+# ==========================================
+
+# --- 1. Signup View (FIXED DB Timeout) ---
 class SignupView(views.APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
         serializer = UserSignupSerializer(data=request.data)
+
+        # 1. Pre-check for existing user
+        email = request.data.get('email')
+        if email and User.objects.filter(email=email).exists():
+            return Response({
+                "error": "This email is already registered. Please login.",
+                "status_code": 400
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
         if serializer.is_valid():
-            user = serializer.save()
-
-            # Generate OTP
-            otp_code = str(random.randint(100000, 999999))
-            OneTimePassword.objects.update_or_create(user=user, defaults={'code': otp_code})
-
-            # Send Email
-            email_subject = "Verify your Aurikrex Account"
-            email_body = f"Hello,\n\nYour verification code is: {otp_code}\n\nThis code expires in 5 minutes."
-            
             try:
+                # --- DATABASE BLOCK (Fast & Locked) ---
+                with transaction.atomic():
+                    # Save user
+                    user = serializer.save()
+
+                    # Generate OTP
+                    otp_code = str(random.randint(100000, 999999))
+                    OneTimePassword.objects.update_or_create(
+                        user=user, 
+                        defaults={'code': otp_code}
+                    )
+                # --- TRANSACTION ENDS HERE ---
+
+                # --- EMAIL BLOCK (Safe from DB timeouts) ---
+                email_subject = "Verify your Aurikrex Account"
+                email_body = f"Hello,\n\nYour verification code is: {otp_code}\n\nThis code expires in 5 minutes."
+                
                 send_mail(
                     subject=email_subject,
                     message=email_body,
                     from_email=settings.EMAIL_HOST_USER,
                     recipient_list=[user.email],
-                    fail_silently=False,
+                    fail_silently=True,  # Prevents 10060 error crash
                 )
-            except Exception as e:
-                user.delete()
-                return Response({"error": "Failed to send email. Please check your address."}, status=500)
 
-            return Response({
-                "message": "Account created. Check your email for the OTP.",
-                "email": user.email
-            }, status=status.HTTP_201_CREATED)
+                return Response({
+                    "message": "Account created. Check your email for the OTP.",
+                    "email": user.email
+                }, status=status.HTTP_201_CREATED)
+
+            except Exception as e:
+                # If anything inside transaction.atomic fails, the user is NOT created
+                return Response({
+                    "error": "Failed to complete signup. Please try again later.",
+                    "details": str(e)
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
+    
 # --- 2. Verify OTP View ---
 class VerifyOTPView(views.APIView):
     permission_classes = [AllowAny]
@@ -128,7 +165,7 @@ class ResendOTPView(views.APIView):
                         message=email_body,
                         from_email=settings.EMAIL_HOST_USER,
                         recipient_list=[user.email],
-                        fail_silently=False, 
+                        fail_silently=True, 
                     )
                 except Exception as e:
                     print(f"Resend email failed: {e}")
@@ -139,8 +176,8 @@ class ResendOTPView(views.APIView):
                 return Response({"message": "If an account exists, a new OTP was sent."}, status=status.HTTP_200_OK)
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-# --- 4. Login View ---
+    
+# --- 4. Login View (FIXED Email Auth) ---
 class LoginView(views.APIView):
     permission_classes = [AllowAny]
 
@@ -150,19 +187,29 @@ class LoginView(views.APIView):
             email = serializer.validated_data['email']
             password = serializer.validated_data['password']
             
-            user = authenticate(username=email, password=password)
-
-            if user:
-                if not user.is_active:
-                    return Response({"error": "Account not verified. Please verify OTP first."}, status=status.HTTP_403_FORBIDDEN)
+            try:
+                # 1. Find the user by their email
+                user = User.objects.get(email=email)
                 
-                tokens = get_tokens_for_user(user)
-                return Response(tokens, status=status.HTTP_200_OK)
-            else:
+                # 2. Check if the password matches the hashed one in the DB
+                if user.check_password(password):
+                    
+                    # 3. Check if they have verified their OTP
+                    if not user.is_active:
+                        return Response({"error": "Account not verified. Please verify OTP first."}, status=status.HTTP_403_FORBIDDEN)
+                    
+                    # 4. Success! Generate tokens
+                    tokens = get_tokens_for_user(user)
+                    return Response(tokens, status=status.HTTP_200_OK)
+                else:
+                    return Response({"error": "Invalid email or password"}, status=status.HTTP_401_UNAUTHORIZED)
+                    
+            except User.DoesNotExist:
+                # If the email isn't in the database at all
                 return Response({"error": "Invalid email or password"}, status=status.HTTP_401_UNAUTHORIZED)
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
+
 # --- 6. Request Password Reset View ---
 class PasswordResetRequestView(views.APIView):
     permission_classes = [AllowAny]
@@ -192,7 +239,7 @@ class PasswordResetRequestView(views.APIView):
                         message=email_body,
                         from_email=settings.EMAIL_HOST_USER,
                         recipient_list=[user.email],
-                        fail_silently=False,
+                        fail_silently=True,
                     )
                 except Exception as e:
                     print(f"Password reset email failed: {e}")
@@ -235,7 +282,6 @@ class PasswordResetConfirmView(views.APIView):
 # --- 8. Google Login View ---
 class GoogleLogin(SocialLoginView):
     adapter_class = GoogleOAuth2Adapter
-    # client_class = OAuth2Client  # Uncomment if your frontend uses auth code instead of access token
     permission_classes = [AllowAny]
     
     def get_response(self):
