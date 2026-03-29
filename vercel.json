@@ -1,0 +1,14 @@
+{
+  "builds": [
+    {
+      "src": "aurikrex_backend/wsgi.py", 
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "aurikrex_backend/wsgi.py" 
+    }
+  ]
+}
