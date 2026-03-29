@@ -115,8 +115,10 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # 6. CORS Settings
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",  # React
-    "http://localhost:3000",
+    "http://localhost:3000", 
+    "https://aurikrex-academy.vercel.app",
 ]
+CORS_ALLOW_CREDENTIALS = True
 
 # 7. DRF & JWT Configuration
 REST_FRAMEWORK = {
