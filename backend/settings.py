@@ -117,6 +117,7 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",  # React
     "http://localhost:3000", 
     "https://aurikrex-academy.vercel.app",
+    "https://falke-beta.vercel.app",
 ]
 CORS_ALLOW_CREDENTIALS = True
 
@@ -178,5 +179,10 @@ SOCIALACCOUNT_PROVIDERS = {
         'AUTH_PARAMS': {'access_type': 'online'},
     }
 }
+
+import os
+
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
 
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
